@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12.3"
 dependencies = [
     "ipykernel>=6.29.5",
+    "kagglehub>=0.3.12",
     "mypy>=1.15.0",
     "pandas>=2.2.3",
     "pandas-stubs>=2.2.3.250308",
