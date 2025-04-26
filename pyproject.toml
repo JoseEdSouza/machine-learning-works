@@ -1,0 +1,12 @@
+[project]
+name = "machine-learning-works"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12.3"
+dependencies = [
+    "mypy>=1.15.0",
+    "pandas>=2.2.3",
+    "pandas-stubs>=2.2.3.250308",
+    "ruff>=0.11.7",
+]
