@@ -7,6 +7,7 @@ import kagglehub
 OUTPUT_PATH = Path("./data").resolve().absolute()
 KAGGLE_HANDLE = "romanfonel/precious-metals-history-since-2000-with-news"
 
+
 def move_or_replace(source: Path, destination: Path):
     """
     Replace the destination file with the source file.
@@ -18,6 +19,7 @@ def move_or_replace(source: Path, destination: Path):
         else:
             shutil.rmtree(destination)
     shutil.move(str(source), str(destination))
+
 
 # Download latest version
 downloaded = kagglehub.dataset_download(KAGGLE_HANDLE, force_download=True)
