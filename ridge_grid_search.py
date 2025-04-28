@@ -1,17 +1,18 @@
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
-from sklearn.model_selection import GridSearchCV, KFold
+import pandas as pd
+from numpy.typing import NDArray
+from sklearn.model_selection import GridSearchCV,  TimeSeriesSplit
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import r2_score
+from sklearn.metrics import r2_score, root_mean_squared_error
 
 RANDOM_SEED = 42
-TEST_RATIO = 0.2
-TOP_N = 20
+N_SPLITS = 5
+TOP_N = 10
 DATA_BASE_PATH = Path("./data")
 
 
@@ -33,7 +34,7 @@ gold["return"] = (gold["tomorrow_close"] - gold["close"]) / gold[
 
 gold["month"] = gold["timestamp"].dt.month
 gold["year"] = gold["timestamp"].dt.year
-gold = pd.get_dummies(gold, columns=["month", "year"], drop_first=True)
+gold = pd.get_dummies(gold, columns=["month", "year"], drop_first=True, dtype=int)
 
 vectorizer = TfidfVectorizer(
     stop_words="english", max_features=1000, ngram_range=(1, 2), min_df=5, max_df=0.8
@@ -52,6 +53,14 @@ sorted_words = sorted(words_freq, key=lambda x: x[1], reverse=True)
 words = [word for word, _ in sorted_words[:TOP_N]]
 frequencies = [freq for _, freq in sorted_words[:TOP_N]]
 
+tfidf_df = pd.DataFrame(
+    {"word": words, "frequency": frequencies}
+).set_index("word").sort_values(by="frequency", ascending=False)
+
+print("Top words:")
+print(tfidf_df)
+print("\n\n")
+
 
 def contain_word(series: pd.Series, word: str) -> pd.Series:
     """
@@ -59,10 +68,17 @@ def contain_word(series: pd.Series, word: str) -> pd.Series:
     """
     return series.str.contains(word, case=False, na=False)
 
+def log_normalize(series: pd.Series) -> pd.Series:
+    """
+    Log normalize a series.
+    """
+    return np.log(series.abs() + 1)
 
 for word in words:
-    gold[word] = contain_word(gold["headlines"], word)
+    gold[word] = contain_word(gold["headlines"], word).astype(int)
 
+gold["volume"] = log_normalize(gold["volume"])
+gold["headlines_count"] = gold["headlines"].apply(lambda x: len(x.split("/"))).astype(int)
 
 target = "tomorrow_close"
 to_drop = [
@@ -91,18 +107,20 @@ pipeline = Pipeline(
     ]
 )
 
-kf = KFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
+cv = TimeSeriesSplit(n_splits=N_SPLITS)
 
 gs = GridSearchCV(
     pipeline,
     param_grid={
-        "model__alpha": np.arange(7000, 10001, 1000),
+        "model__alpha": [0.01, 0.1, 1, 10, 100],
         "model__solver": ["auto", "saga"],
+        "model__random_state": [RANDOM_SEED],
     },
     scoring="neg_root_mean_squared_error",
-    cv=kf,
+    cv=cv,
     n_jobs=-1,
 )
+print("X:", X)
 
 gs.fit(X, y)
 
@@ -135,3 +153,20 @@ print(f"R² for the best model: {r2:.4f}")
 
 # results.to_csv("grid_search_results.csv", sep=";", index=True)
 print(results)
+
+
+def print_95_percentile_ci(y_truth: NDArray, y_pred: NDArray) -> None:
+    """
+    Print the 95% confidence interval for the predictions.
+    """
+    
+    r2 = r2_score(y_truth, y_pred)
+    rmse = root_mean_squared_error(y_truth, y_pred)
+
+    r2_95th = np.quantile(r2, [0.025, 0.975])
+    rmse_95th = np.quantile(rmse, [0.025, 0.975])
+
+    print(f"95% CI for R²: {r2_95th}")
+    print(f"95% CI for RMSE: {rmse_95th}")
+
+print_95_percentile_ci(y, y_pred)
