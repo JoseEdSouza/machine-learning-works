@@ -2,15 +2,15 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from numpy.typing import NDArray
-from sklearn.model_selection import GridSearchCV,  TimeSeriesSplit
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit, train_test_split
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import r2_score, root_mean_squared_error
+from sklearn.metrics import r2_score
 
 RANDOM_SEED = 42
+TEST_RATIO = 0.2
 N_SPLITS = 5
 TOP_N = 10
 DATA_BASE_PATH = Path("./data")
@@ -19,6 +19,8 @@ DATA_BASE_PATH = Path("./data")
 gold_file_path = DATA_BASE_PATH / "final_gold_data.csv"
 
 gold = pd.read_csv(gold_file_path, sep=";", encoding="utf-8", parse_dates=["timestamp"])
+
+gold = gold.sort_values(by="timestamp", ascending=True)
 
 gold["day_variation"] = gold["open"] - gold["close"]
 gold["max_diff"] = gold["high"] - gold["low"]
@@ -53,9 +55,11 @@ sorted_words = sorted(words_freq, key=lambda x: x[1], reverse=True)
 words = [word for word, _ in sorted_words[:TOP_N]]
 frequencies = [freq for _, freq in sorted_words[:TOP_N]]
 
-tfidf_df = pd.DataFrame(
-    {"word": words, "frequency": frequencies}
-).set_index("word").sort_values(by="frequency", ascending=False)
+tfidf_df = (
+    pd.DataFrame({"word": words, "frequency": frequencies})
+    .set_index("word")
+    .sort_values(by="frequency", ascending=False)
+)
 
 print("Top words:")
 print(tfidf_df)
@@ -68,17 +72,21 @@ def contain_word(series: pd.Series, word: str) -> pd.Series:
     """
     return series.str.contains(word, case=False, na=False)
 
+
 def log_normalize(series: pd.Series) -> pd.Series:
     """
     Log normalize a series.
     """
     return np.log(series.abs() + 1)
 
+
 for word in words:
     gold[word] = contain_word(gold["headlines"], word).astype(int)
 
 gold["volume"] = log_normalize(gold["volume"])
-gold["headlines_count"] = gold["headlines"].apply(lambda x: len(x.split("/"))).astype(int)
+gold["headlines_count"] = (
+    gold["headlines"].apply(lambda x: len(x.split("/"))).astype(int)
+)
 
 target = "tomorrow_close"
 to_drop = [
@@ -100,6 +108,10 @@ to_drop = [
 X = gold.drop(to_drop, axis=1)
 y = gold[target]
 
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=TEST_RATIO, shuffle=False
+)
+
 pipeline = Pipeline(
     steps=[
         ("scaler", StandardScaler()),
@@ -120,9 +132,8 @@ gs = GridSearchCV(
     cv=cv,
     n_jobs=-1,
 )
-print("X:", X)
 
-gs.fit(X, y)
+gs.fit(X_train, y_train)
 
 print("Best parameters:", gs.best_params_)
 print("Best score:", gs.best_score_)
@@ -147,26 +158,24 @@ results = results.set_index("Rank")
 
 # Calculate R² for the best model
 best_model = gs.best_estimator_
-y_pred = best_model.predict(X)
-r2 = r2_score(y, y_pred)
+y_pred = best_model.predict(X_test)
+r2 = r2_score(y_test, y_pred)
 print(f"R² for the best model: {r2:.4f}")
 
 # results.to_csv("grid_search_results.csv", sep=";", index=True)
 print(results)
 
 
-def print_95_percentile_ci(y_truth: NDArray, y_pred: NDArray) -> None:
+def print_95_percentile_ci(results) -> None:
     """
     Print the 95% confidence interval for the predictions.
     """
-    
-    r2 = r2_score(y_truth, y_pred)
-    rmse = root_mean_squared_error(y_truth, y_pred)
 
-    r2_95th = np.quantile(r2, [0.025, 0.975])
-    rmse_95th = np.quantile(rmse, [0.025, 0.975])
+    rmse = results["RMSE"].values
 
-    print(f"95% CI for R²: {r2_95th}")
+    rmse_95th = np.percentile(rmse, [0.025, 0.975])
+
     print(f"95% CI for RMSE: {rmse_95th}")
 
-print_95_percentile_ci(y, y_pred)
+
+print_95_percentile_ci(results)
