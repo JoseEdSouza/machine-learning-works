@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 import kagglehub
 
-OUTPUT_PATH = Path("./data").resolve().absolute()
+OUTPUT_PATH = Path(__file__).parent / "data"
 KAGGLE_HANDLE = "romanfonel/precious-metals-history-since-2000-with-news"
 
 

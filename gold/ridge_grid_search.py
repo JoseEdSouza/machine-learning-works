@@ -1,7 +1,9 @@
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
+
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit, train_test_split
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
@@ -10,8 +12,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import r2_score
 
 RANDOM_SEED = 42
-TEST_RATIO = 0.2
-N_SPLITS = 5
+TEST_RATIO = 0.05
+N_SPLITS = 100
 TOP_N = 10
 DATA_BASE_PATH = Path("./data")
 
@@ -20,18 +22,54 @@ gold_file_path = DATA_BASE_PATH / "final_gold_data.csv"
 
 gold = pd.read_csv(gold_file_path, sep=";", encoding="utf-8", parse_dates=["timestamp"])
 
-gold = gold.sort_values(by="timestamp", ascending=True)
 
-gold["day_variation"] = gold["open"] - gold["close"]
-gold["max_diff"] = gold["high"] - gold["low"]
-
-gold["tomorrow_close"] = gold["close"].shift(-1)
-gold = gold.dropna(subset=["tomorrow_close"])  # Remove last row with NaN
+def treat_data(df: pd.DataFrame) -> pd.DataFrame:
+    return df.sort_values(by="timestamp", ascending=True)
 
 
-gold["return"] = (gold["tomorrow_close"] - gold["close"]) / gold[
-    "close"
-]  # return might be our target
+def shift_and_clean_nan(
+    df: pd.DataFrame, column: str, shift: int = 1, rename_to: str | None = None
+) -> pd.DataFrame:
+    if not rename_to:
+        rename_to = f"shift_{column}_{shift}"
+    df[rename_to] = df[column].shift(shift)
+    df = df.dropna(subset=[rename_to])  # Remove last row with NaN
+
+    return df
+
+
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    df["day_variation"] = df["open"] - df["close"]
+    df["max_diff"] = df["high"] - df["low"]
+
+    df["return"] = (df["tomorrow_close"] - df["close"]) / df["close"]
+
+    return df
+
+
+type ColType = Literal["month", "year", "day", "hour", "minute", "second"]
+
+
+def access_time_series(series: pd.Series, col_type: ColType) -> pd.Series:
+    if col_type not in ["month", "year", "day", "hour", "minute", "second"]:
+        raise TypeError("Invalid option")
+
+    return getattr(series.dt, col_type)
+
+
+def encode_time_features(
+    df: pd.DataFrame, time_col: str, col_type: ColType | list[ColType]
+) -> pd.DataFrame:
+    if isinstance(col_type, str):
+        col_type = [col_type]
+
+    for c_type in col_type:
+        df[c_type] = access_time_series(df[time_col], c_type)
+
+    return pd.get_dummies(df, columns=col_type, drop_first=True, dtype=int)
+
+
+access_time_series(gold["timestamp"], "month")
 
 
 gold["month"] = gold["timestamp"].dt.month
