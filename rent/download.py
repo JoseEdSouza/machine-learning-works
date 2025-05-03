@@ -36,16 +36,15 @@ def uzip_buffer(buffer_: BytesIO, output_path: Path):
 
 
 def unzip_7z_files_in_folder(
-        folder_path: Path,
-        output_path: Path,
-        filters: list[Callable[[str], bool]] | None = None,
+    folder_path: Path,
+    output_path: Path,
+    filters: list[Callable[[str], bool]] | None = None,
 ):
     """
     Unzip all zip files in the specified folder.
     """
     check_for_filters = bool(filters)
     for file_7z in folder_path.glob("*.7z"):
-
         if check_for_filters and not any(f(file_7z.name) for f in filters):
             continue
 
@@ -59,6 +58,4 @@ with tempfile.TemporaryDirectory() as temp_dir:
     buffer = BytesIO()
     download_zip_dataset(API_BASE_URL, buffer)
     uzip_buffer(buffer, temp_dir_path)
-    unzip_7z_files_in_folder(
-        temp_dir_path, OUTPUT_PATH, filters=[lambda f: "10K" in f]
-    )
+    unzip_7z_files_in_folder(temp_dir_path, OUTPUT_PATH, filters=[lambda f: "10K" in f])
