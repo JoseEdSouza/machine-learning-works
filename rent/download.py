@@ -14,19 +14,24 @@ OUTPUT_PATH = Path(__file__).parent / "data"
 
 URL = "https://archive.ics.uci.edu/static/public/555/apartment+for+rent+classified.zip"
 
+
 def timer[**P, T](func: Callable[P, T]) -> Callable[P, T]:
     """
     Decorator to measure the execution time of a function.
     """
+
     @wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         import time
+
         start_time = time.time()
         result = func(*args, **kwargs)
         end_time = time.time()
         print(f"{func.__name__} took {end_time - start_time:.2f} seconds")
         return result
+
     return wrapper
+
 
 @timer
 def download_zip_dataset(url: str, buffer_: BytesIO):
@@ -37,13 +42,16 @@ def download_zip_dataset(url: str, buffer_: BytesIO):
     response.raise_for_status()
 
     total_size = int(response.headers.get("content-length", 0))
-    with tqdm(total=total_size, unit="B", unit_scale=True, desc="Downloading ZIP") as pbar:
+    with tqdm(
+        total=total_size, unit="B", unit_scale=True, desc="Downloading ZIP"
+    ) as pbar:
         for chunk in response.iter_content(chunk_size=1024):
             buffer_.write(chunk)
             pbar.update(len(chunk))
-    
+
     buffer_.flush()  # Ensure all data is written to the buffer
     buffer_.seek(0)  # Move the cursor to the beginning of the BytesIO object
+
 
 @timer
 def extract_zip_from_buffer(buffer_: BytesIO, output_path: Path):
@@ -72,9 +80,12 @@ def extract_7z_files_from_folder(
     if not files:
         print(f"No 7z files found in {folder_path}.")
         return
-    
+
+    if filters:
+        files = [f for f in files if any(filter_fn(f.name) for filter_fn in filters)]
+
     print(f"Found {len(files)} 7z files in {folder_path}.")
-    
+
     if not output_path.exists():
         output_path.mkdir(parents=True, exist_ok=True)
     if not output_path.is_dir():
@@ -83,10 +94,6 @@ def extract_7z_files_from_folder(
     tqdm.write(f"Extracting {len(files)} 7z files to {output_path}...")
     with tqdm(total=len(files), desc="Extracting 7z files", unit="file") as pbar:
         for file_7z in files:
-            if filters and not any(filter_(file_7z.name) for filter_ in filters):
-                pbar.update(1)
-                continue
-
             with py7zr.SevenZipFile(file_7z, "r") as ref_7z:
                 ref_7z.extractall(output_path)
 
@@ -94,11 +101,14 @@ def extract_7z_files_from_folder(
                 file_7z.unlink()  # Safely remove the 7z file after extraction
             except OSError as e:
                 print(f"Error deleting file {file_7z}: {e}")
-            
+
             pbar.update(1)
 
+
 @timer
-def process_and_extract_dataset(url: str, output_path: Path, filters: list[Callable[[str], bool]] | None = None):
+def process_and_extract_dataset(
+    url: str, output_path: Path, filters: list[Callable[[str], bool]] | None = None
+):
     """
     Download a dataset from a URL, extract its contents, and process 7z files with optional filters.
     """
