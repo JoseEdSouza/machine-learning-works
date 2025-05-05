@@ -176,3 +176,7 @@ cython_debug/
 # idea and text editor files
 .idea/
 .vscode/
+
+# data dirs
+data/
+*/data
