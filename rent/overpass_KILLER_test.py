@@ -1,25 +1,24 @@
 import asyncio
 import time
 from asyncio import Semaphore
-from concurrent.futures import ThreadPoolExecutor
 from functools import partial, wraps
 from io import BytesIO
 from itertools import chain
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Any, Callable, Generator, NoReturn, Sequence, cast
 
 import aiohttp
 import polars as pl
-from numpy.typing import NDArray
 from haversine import haversine, Unit
+from numpy.typing import NDArray
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as tqdm_asyncio
-
 
 DATA_BASE_PATH = Path(__file__).parent / "data"
 
 # 0 to 1, if the ratio is 0.2, the workload will be divided across N workers with N * ratio workload
-PARALLEL_REQUESTS_RATIO = 0.1
+PARALLEL_REQUESTS_RATIO = 0.2
 PARALLEL_PROCESSING_RATIO = 0.1
 WAIT_TIME_AFTER_REQUEST = True
 
@@ -305,11 +304,14 @@ def count_pois_near_apartments(
         process_apartment_chunk, pois_np=pois_np, radius_meters=radius_meters
     )
 
+    if ratio is None:
+        ratio = 1 / cpu_count()
+
     apartment_rows = list(apartments.iter_rows(named=True))
     apartment_chunks = list(chunkify(apartment_rows, ratio=ratio))
 
-    with ThreadPoolExecutor() as executor:
-        all_results = executor.map(worker, apartment_chunks)
+    with Pool(processes=cpu_count()) as pool:
+        all_results = pool.map(worker, apartment_chunks)
 
     results = chain.from_iterable(all_results)
 
@@ -328,11 +330,13 @@ async def main():
     rent_loaded = await rent.collect_async()
 
     final_result = count_pois_near_apartments(
-        rent_loaded, result_loaded, RADIUS_METERS, ratio=PARALLEL_PROCESSING_RATIO
+        rent_loaded, result_loaded, RADIUS_METERS
     )
 
     print(final_result)
-    final_result.write_parquet("result.parquet", compression="zstd")
+    
+    output_path = DATA_BASE_PATH / "result.parquet"
+    final_result.write_parquet(output_path, compression="zstd")
 
 
 if __name__ == "__main__":
