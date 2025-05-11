@@ -335,7 +335,7 @@ async def main():
 
     print(final_result)
     
-    output_path = DATA_BASE_PATH / "result.parquet"
+    output_path = DATA_BASE_PATH / "poi-data-count.parquet"
     final_result.write_parquet(output_path, compression="zstd")
 
 
