@@ -6,7 +6,17 @@ from io import BytesIO
 from itertools import chain
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
-from typing import Any, Callable, Generator, NoReturn, Sequence, Iterable, cast
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Generator,
+    Hashable,
+    NoReturn,
+    Sequence,
+    Iterable,
+    cast,
+)
 
 import aiohttp
 import numpy as np
@@ -16,8 +26,10 @@ from numpy.typing import NDArray
 from sklearn.neighbors import BallTree
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as tqdm_asyncio
+import hashlib
 
 DATA_BASE_PATH = Path(__file__).parent / "data"
+CACHE_BASE_PATH = DATA_BASE_PATH / "cache"
 
 EARTH_RADIUS = 6_371_000.0  # in meters
 
@@ -26,7 +38,7 @@ PARALLEL_PROCESSING_JOBS = 5
 
 WAIT_TIME_AFTER_REQUEST = True
 
-LENGTH = 1_000
+LENGTH = 10_000
 RADIUS_METERS = 1_000
 TAGS = ["restaurant", "cafe", "bar"]
 API_URL = "https://overpass-api.de/api/interpreter"
@@ -227,7 +239,7 @@ def chunkify[T](
 
     if sum(bool(param) for param in [chunk_size, ratio, n_chunks]) != 1:
         raise ValueError("Specify exactly one of chunk_size, ratio, or n_chunks")
-    
+
     data = np.array(data)
     if len(data) == 0:
         yield []
@@ -237,14 +249,14 @@ def chunkify[T](
         if chunk_size <= 0:
             raise ValueError("chunk_size must be greater than 0")
         for i in range(0, len(data), chunk_size):
-            yield data[i:i + chunk_size].tolist()
+            yield data[i : i + chunk_size].tolist()
 
     elif ratio is not None:
         if ratio <= 0 or ratio > 1:
             raise ValueError("ratio must be between 0 and 1")
         chunk_size = max(1, int(len(data) * ratio))
         for i in range(0, len(data), chunk_size):
-            yield data[i:i + chunk_size].tolist()
+            yield data[i : i + chunk_size].tolist()
 
     elif n_chunks is not None:
         if n_chunks <= 0:
@@ -252,6 +264,29 @@ def chunkify[T](
         indices = np.linspace(0, len(data), n_chunks + 1, dtype=int)
         for start, end in zip(indices[:-1], indices[1:]):
             yield data[start:end].tolist()
+
+
+async def load_or_cache_fetched_data(
+    soruce: Hashable, cache_dir: Path, processor: Callable[[], Awaitable[pl.LazyFrame]]
+) -> pl.LazyFrame:
+    """
+    Load or cache fetched data from the Overpass API.
+    If the data is already cached, it will be loaded from the cache.
+    Otherwise, it will be fetched and saved to the cache.
+    """
+    source_hash = hashlib.sha256(str(soruce).encode("utf-8")).hexdigest()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"coords_cache_{source_hash}.parquet"
+    if cache_path.exists():
+        print(f"CACHE HIT: Loading cached data from {cache_path}")
+        return pl.scan_parquet(cache_path)
+    else:
+        print(f"CACHE MISS: Fetching data and saving to {cache_path}")
+        data = await processor()
+        collected_data = await data.collect_async()
+        collected_data.write_parquet(cache_path, compression="zstd")
+        print(f"Saved fetched data to cache at {cache_path}")
+        return data
 
 
 @timer
@@ -282,10 +317,20 @@ async def fetch_overpass_data(
             },
         )
 
-    tasks = (process_chunk_task(chunk) for chunk in chunkify(coords, n_chunks=n_jobs))
-    lfs = await asyncio.gather(*tasks)
+    # Create a hash for the coordinates to use as a cache key
 
-    return pl.concat(lfs).unique(subset="@id").sort(by="@id")
+    async def process_coordinates_data() -> pl.LazyFrame:
+        tasks = (
+            process_chunk_task(chunk) for chunk in chunkify(coords, n_chunks=n_jobs)
+        )
+        lfs = await asyncio.gather(*tasks)
+        return pl.concat(lfs).unique(subset="@id").sort(by="@id")
+
+    return await load_or_cache_fetched_data(
+        soruce=coords,
+        cache_dir=CACHE_BASE_PATH,
+        processor=process_coordinates_data,
+    )
 
 
 type Row = dict[str, Any]
@@ -293,7 +338,7 @@ type Row = dict[str, Any]
 
 def process_apartment_chunk(
     chunk: Sequence[Row],
-    amenities: NDArray[str], # type: ignore
+    amenities: NDArray[str],  # type: ignore
     tree: BallTree,
     radius_rad: float,
 ) -> list[dict[str, int]]:
@@ -373,11 +418,13 @@ async def main():
         DATA_BASE_PATH / "request-result-ball-tree.parquet", compression="zstd"
     )
 
-    final_result = count_pois_near_apartments(rent_loaded, result_loaded, RADIUS_METERS)
+    final_result = count_pois_near_apartments(
+        rent_loaded, result_loaded, RADIUS_METERS, n_jobs=PARALLEL_PROCESSING_JOBS
+    )
 
     print(final_result)
 
-    output_path = DATA_BASE_PATH / "poi-data-count-ball-tree.parquet"
+    output_path = DATA_BASE_PATH / f"poi-data-count-{LENGTH}.parquet"
     final_result.write_parquet(output_path, compression="zstd")
 
 
