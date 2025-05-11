@@ -5,14 +5,19 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12.3"
 dependencies = [
+    "aiohttp>=3.11.18",
+    "haversine>=2.9.0",
     "ipykernel>=6.29.5",
     "kagglehub>=0.3.12",
     "matplotlib>=3.10.1",
     "mypy>=1.15.0",
     "pandas>=2.2.3",
     "pandas-stubs>=2.2.3.250308",
+    "polars>=1.29.0",
     "py7zr>=0.22.0",
+    "pyarrow>=20.0.0",
     "requests>=2.32.3",
     "ruff>=0.11.7",
     "scikit-learn>=1.6.1",
+    "zstd>=1.5.7.0",
 ]
