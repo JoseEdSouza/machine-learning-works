@@ -277,15 +277,16 @@ async def load_or_cache_fetched_data(
     source_hash = hashlib.sha256(str(soruce).encode("utf-8")).hexdigest()
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"coords_cache_{source_hash}.parquet"
+    relative_path = cache_path.relative_to(cache_dir)
     if cache_path.exists():
-        print(f"CACHE HIT: Loading cached data from {cache_path}")
+        print(f"CACHE HIT: Loading cached data from {relative_path}")
         return pl.scan_parquet(cache_path)
     else:
-        print(f"CACHE MISS: Fetching data and saving to {cache_path}")
+        print(f"CACHE MISS: Fetching data and saving to {relative_path}")
         data = await processor()
         collected_data = await data.collect_async()
         collected_data.write_parquet(cache_path, compression="zstd")
-        print(f"Saved fetched data to cache at {cache_path}")
+        print(f"Saved fetched data to cache at {relative_path}")
         return data
 
 
@@ -393,7 +394,7 @@ def count_pois_near_apartments(
         n_jobs = cpu_count()
 
     apartment_rows = list(apartments.iter_rows(named=True))
-    apartment_chunks = list(chunkify(apartment_rows, n_chunks=n_jobs))
+    apartment_chunks = chunkify(apartment_rows, n_chunks=n_jobs)
 
     with Pool(processes=cpu_count()) as pool:
         all_results = pool.map(worker, apartment_chunks)
@@ -413,10 +414,6 @@ async def main():
     rent_loaded = await rent.collect_async()
 
     print("Found POIs:", result_loaded.shape[0])
-
-    result_loaded.write_parquet(
-        DATA_BASE_PATH / "request-result-ball-tree.parquet", compression="zstd"
-    )
 
     final_result = count_pois_near_apartments(
         rent_loaded, result_loaded, RADIUS_METERS, n_jobs=PARALLEL_PROCESSING_JOBS
