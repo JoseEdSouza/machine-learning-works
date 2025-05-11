@@ -6,24 +6,28 @@ from io import BytesIO
 from itertools import chain
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
-from typing import Any, Callable, Generator, NoReturn, Sequence, cast
+from typing import Any, Callable, Generator, NoReturn, Sequence, Iterable, cast
 
 import aiohttp
+import numpy as np
 import polars as pl
 from haversine import haversine, Unit
 from numpy.typing import NDArray
+from sklearn.neighbors import BallTree
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as tqdm_asyncio
 
 DATA_BASE_PATH = Path(__file__).parent / "data"
 
-# 0 to 1, if the ratio is 0.2, the workload will be divided across N workers with N * ratio workload
-PARALLEL_REQUESTS_RATIO = 0.2
-PARALLEL_PROCESSING_RATIO = 0.1
+EARTH_RADIUS = 6_371_000.0  # in meters
+
+PARALLEL_REQUESTS_JOBS = 5
+PARALLEL_PROCESSING_JOBS = 5
+
 WAIT_TIME_AFTER_REQUEST = True
 
-LENGTH = 10000
-RADIUS_METERS = 1000
+LENGTH = 1_000
+RADIUS_METERS = 1_000
 TAGS = ["restaurant", "cafe", "bar"]
 API_URL = "https://overpass-api.de/api/interpreter"
 
@@ -37,6 +41,7 @@ def timer[**P, T](func: Callable[P, T]) -> Callable[P, T]:
     Decorator to measure the execution time of a function.
     Supports both synchronous and asynchronous functions.
     """
+
     @wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         start_time = time.time()
@@ -130,7 +135,7 @@ def build_tags_query(tags: list[str]) -> str:
 
 
 def build_overpass_query_csv(
-    locations: list[Coordinate], tags: list[str], radius: int = 1000
+    locations: Sequence[Coordinate], tags: list[str], radius: int = 1000
 ) -> str:
     """
     Builds the Overpass API query for the given locations and tags, returning results in CSV format.
@@ -162,7 +167,7 @@ async def get_coordinates(lf: pl.LazyFrame) -> list[Coordinate]:
     """
     df = await lf.select("latitude", "longitude").collect_async()
     zipped = df.to_numpy().tolist()
-    return list(map(tuple, zipped))
+    return list(map(tuple, zipped))  # type: ignore
 
 
 @timer
@@ -180,18 +185,18 @@ async def request_overpass_api(query: str) -> BytesIO | None:
                 if response.status == 409:
                     print("Too many requests, waiting 10 seconds")
                     await asyncio.sleep(10)
-                    continue # Retry on 409 Conflict
+                    continue  # Retry on 409 Conflict
                 elif response.status == 200:
                     print("Request successful")
                 else:
                     response.raise_for_status()
 
                 async for chunk in tqdm_asyncio(
-                    response.content.iter_chunked(1024),
+                    cast(Iterable[bytes], response.content.iter_chunked(1024)),
                     unit="KB",
                     unit_scale=True,
                     desc="Downloading Overpass Data",
-                ):
+                ):  # type: ignore
                     buffer.write(chunk)
 
                 buffer.flush()
@@ -205,39 +210,62 @@ def chunkify[T](
     data: Sequence[T],
     chunk_size: int | None = None,
     ratio: float | None = None,
-    start: int = 0,
-) -> Generator[list[T], None, NoReturn]:
+    n_chunks: int | None = None,
+) -> Generator[Sequence[T], None, NoReturn]:
     """
-    Generate chunks of data from the given iterable with a specified chunk size, starting from a given index.
+    Generate chunks of data from the given iterable with a specified chunk size, ratio, or number of chunks,
+    starting from a given index.
     """
-    if chunk_size and ratio:
-        raise ValueError("Cannot specify both chunk_size and ratio")
+    if sum(bool(param) for param in [chunk_size, ratio, n_chunks]) > 1:
+        raise ValueError("Specify only one of chunk_size, ratio, or n_chunks")
 
-    if not chunk_size and not ratio:
-        ratio = 1
+    data = np.array(data)
 
-    if ratio:
-        chunk_size = int(len(data) * ratio)
+    if len(data) == 0:
+        yield []
+        return
 
-    data = list(data)
+    if sum(bool(param) for param in [chunk_size, ratio, n_chunks]) != 1:
+        raise ValueError("Specify exactly one of chunk_size, ratio, or n_chunks")
+    
+    data = np.array(data)
+    if len(data) == 0:
+        yield []
+        return
 
-    for i in range(start, len(data), chunk_size):
-        yield data[i : i + chunk_size]
+    if chunk_size is not None:
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than 0")
+        for i in range(0, len(data), chunk_size):
+            yield data[i:i + chunk_size].tolist()
+
+    elif ratio is not None:
+        if ratio <= 0 or ratio > 1:
+            raise ValueError("ratio must be between 0 and 1")
+        chunk_size = max(1, int(len(data) * ratio))
+        for i in range(0, len(data), chunk_size):
+            yield data[i:i + chunk_size].tolist()
+
+    elif n_chunks is not None:
+        if n_chunks <= 0:
+            raise ValueError("n_chunks must be greater than 0")
+        indices = np.linspace(0, len(data), n_chunks + 1, dtype=int)
+        for start, end in zip(indices[:-1], indices[1:]):
+            yield data[start:end].tolist()
 
 
 @timer
 async def fetch_overpass_data(
-    coords: list[Coordinate], tags: list[str], ratio: float | None = None
+    coords: list[Coordinate], tags: list[str], n_jobs: int | None = None
 ) -> pl.LazyFrame:
-    
-    async def process_chunk_task(chunk: list[Coordinate]) -> pl.DataFrame:
+    async def process_chunk_task(chunk: Sequence[Coordinate]) -> pl.LazyFrame:
         query = build_overpass_query_csv(chunk, tags)
 
         async with sem:
             buffer = await request_overpass_api(query)
             if buffer is None:
                 raise Exception("Failed to get Overpass API response")
-            if WAIT_TIME_AFTER_REQUEST:
+            if WAIT_TIME_AFTER_REQUEST and bool(n_jobs):
                 print("Waiting 10 seconds after request")
                 await asyncio.sleep(10)  # Avoid hitting the rate limit
 
@@ -254,41 +282,44 @@ async def fetch_overpass_data(
             },
         )
 
-    tasks = (process_chunk_task(chunk) for chunk in chunkify(coords, ratio=ratio))
+    tasks = (process_chunk_task(chunk) for chunk in chunkify(coords, n_chunks=n_jobs))
     lfs = await asyncio.gather(*tasks)
 
-    return pl.concat(lfs).sort(by="@id")
+    return pl.concat(lfs).unique(subset="@id").sort(by="@id")
+
+
+type Row = dict[str, Any]
 
 
 def process_apartment_chunk(
-    chunk: list[dict[str, Any]], pois_np: NDArray, radius_meters: int
+    chunk: Sequence[Row],
+    amenities: NDArray[str], # type: ignore
+    tree: BallTree,
+    radius_rad: float,
 ) -> list[dict[str, int]]:
-    chunk_results = []
+    apt_coords_rad = np.radians(
+        np.array([[row["latitude"], row["longitude"]] for row in chunk])
+    )
+
+    neighbors = tree.query_radius(apt_coords_rad, r=radius_rad)
+
+    results = []
     with tqdm(chunk, desc="Processing apartments") as pbar:
-        for row in pbar:
-            pbar.set_postfix({"id": row["id"]})
+        for apt, poi_indexes in zip(chunk, neighbors):
+            apt_id = apt["id"]
+            nearby_counts: dict[str, int] = {}
+            for idx in poi_indexes:
+                tag = str(amenities[idx])
+                nearby_counts[tag] = nearby_counts.get(tag, 0) + 1
 
-            apt_id = row["id"]
-            apt_coord = (row["latitude"], row["longitude"])
-
-            nearby_counts = {}
-
-            for poi_lat, poi_lon, tag in pois_np:
-                poi_coord = (poi_lat, poi_lon)
-                dist = haversine_meters(apt_coord, poi_coord)
-
-                if dist <= radius_meters:
-                    tag = cast(str, tag)
-                    nearby_counts[tag] = nearby_counts.get(tag, 0) + 1
-
-            chunk_results.extend(
-                [
-                    {"id": apt_id, "amenity": tag, "count": count}
-                    for tag, count in nearby_counts.items()
-                ]
+            results.extend(
+                {"id": apt_id, "amenity": tag, "count": count}
+                for tag, count in nearby_counts.items()
             )
-    
-    return chunk_results
+            pbar.set_postfix({"id": apt_id})
+            pbar.update(1)
+
+    return results
 
 
 @timer
@@ -296,19 +327,28 @@ def count_pois_near_apartments(
     apartments: pl.DataFrame,
     pois: pl.DataFrame,
     radius_meters: float = 1000.0,
-    ratio: float | None = None,
+    n_jobs: int | None = None,
 ) -> pl.DataFrame:
-    pois_np = pois.select(["@lat", "@lon", "amenity"]).to_numpy()
+    pois_np: NDArray = pois.select(["@lat", "@lon", "amenity"]).to_numpy()
+
+    radius_rad = radius_meters / EARTH_RADIUS
+
+    coords = np.radians(
+        pois_np[:, :2].astype(np.float64)
+    )  # Extract latitude and longitude
+    amenities = pois_np[:, 2]  # Extract amenities
+
+    tree = BallTree(coords, metric="haversine", leaf_size=40)  # type: ignore
 
     worker = partial(
-        process_apartment_chunk, pois_np=pois_np, radius_meters=radius_meters
+        process_apartment_chunk, amenities=amenities, tree=tree, radius_rad=radius_rad
     )
 
-    if ratio is None:
-        ratio = 1 / cpu_count()
+    if n_jobs is None:
+        n_jobs = cpu_count()
 
     apartment_rows = list(apartments.iter_rows(named=True))
-    apartment_chunks = list(chunkify(apartment_rows, ratio=ratio))
+    apartment_chunks = list(chunkify(apartment_rows, n_chunks=n_jobs))
 
     with Pool(processes=cpu_count()) as pool:
         all_results = pool.map(worker, apartment_chunks)
@@ -322,20 +362,22 @@ def count_pois_near_apartments(
 async def main():
     rent = load_rent_data(RENT_PATH, LENGTH)
     coordinates = await get_coordinates(rent)
-    result = await fetch_overpass_data(
-        coordinates, TAGS, ratio=PARALLEL_REQUESTS_RATIO
-    )
+    result = await fetch_overpass_data(coordinates, TAGS, n_jobs=PARALLEL_REQUESTS_JOBS)
 
     result_loaded = await result.collect_async()
     rent_loaded = await rent.collect_async()
 
-    final_result = count_pois_near_apartments(
-        rent_loaded, result_loaded, RADIUS_METERS
+    print("Found POIs:", result_loaded.shape[0])
+
+    result_loaded.write_parquet(
+        DATA_BASE_PATH / "request-result-ball-tree.parquet", compression="zstd"
     )
 
+    final_result = count_pois_near_apartments(rent_loaded, result_loaded, RADIUS_METERS)
+
     print(final_result)
-    
-    output_path = DATA_BASE_PATH / "poi-data-count.parquet"
+
+    output_path = DATA_BASE_PATH / "poi-data-count-ball-tree.parquet"
     final_result.write_parquet(output_path, compression="zstd")
 
 
