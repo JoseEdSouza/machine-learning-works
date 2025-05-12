@@ -166,7 +166,7 @@ def build_tags_query(tags: list[str]) -> str:
 
 
 def build_overpass_query_csv(
-    locations: Sequence[Coordinate], tags: list[str], radius: int = 1000
+    locations: Sequence[Coordinate], tags: list[str], radius: int = RADIUS_METERS
 ) -> str:
     """
     Builds the Overpass API query for the given locations and tags, returning results in CSV format.
@@ -315,11 +315,13 @@ async def load_or_cache_fetched_data(
 async def fetch_overpass_data(
     coords: list[Coordinate], tags: list[str], n_jobs: int | None = None
 ) -> pl.LazyFrame:
-    async def process_chunk_task(chunk: Sequence[Coordinate]) -> pl.LazyFrame:
+
+    async def process_chunk_task(chunk: Sequence[Coordinate], pbar: tqdm_asyncio) -> pl.LazyFrame:
         query = build_overpass_query_csv(chunk, tags)
 
         async with sem:
             buffer = await request_overpass_api(query)
+            pbar.update(1)
             if buffer is None:
                 raise Exception("Failed to get Overpass API response")
             if WAIT_TIME_AFTER_REQUEST and bool(n_jobs):
@@ -341,20 +343,32 @@ async def fetch_overpass_data(
             },
         )
 
-    # Create a hash for the coordinates to use as a cache key
+    
 
     async def process_coordinates_data() -> pl.LazyFrame:
-        tasks = (
-            process_chunk_task(chunk) for chunk in chunkify(coords, n_chunks=n_jobs)
+        pbar = tqdm_asyncio(
+            total=n_jobs,
+            desc="Processing chunks",
+            unit="chunk",
         )
+
+        tasks = (
+            process_chunk_task(chunk, pbar) for chunk in chunkify(coords, n_chunks=n_jobs)
+        )
+
         lfs = await asyncio.gather(*tasks)
+
+        pbar.close()
+
         return pl.concat(lfs).unique(subset="@id").sort(by="@id")
 
-    return await load_or_cache_fetched_data(
-        soruce={"tags": tags, "coords": coords},
+    result =  await load_or_cache_fetched_data(
+        soruce={"tags": tags, "coords": coords, "radius": RADIUS_METERS},
         cache_dir=CACHE_BASE_PATH,
         processor=process_coordinates_data,
     )
+
+    return result
 
 
 type Row = dict[str, Any]
@@ -444,8 +458,16 @@ async def main():
 
     print(final_result)
 
-    output_path = DATA_BASE_PATH / f"poi-data-count-{LENGTH}.parquet"
+    info = {
+        "tags": TAGS,
+        "radius": RADIUS_METERS,
+        "coords": coordinates,
+    }
+    info_hash = hashlib.sha256(str(info).encode("utf-8")).hexdigest()
+
+    output_path = DATA_BASE_PATH / f"poi-data-count-{info_hash}.parquet"
     final_result.write_parquet(output_path, compression="zstd")
+    print(f"Saved results to {output_path.relative_to(DATA_BASE_PATH.parent)}")
 
 
 if __name__ == "__main__":
