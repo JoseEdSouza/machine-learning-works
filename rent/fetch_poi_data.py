@@ -33,14 +33,30 @@ CACHE_BASE_PATH = DATA_BASE_PATH / "cache"
 
 EARTH_RADIUS = 6_371_000.0  # in meters
 
-PARALLEL_REQUESTS_JOBS = 5
-PARALLEL_PROCESSING_JOBS = 5
+PARALLEL_REQUESTS_JOBS = 1
+PARALLEL_PROCESSING_JOBS = None
 
 WAIT_TIME_AFTER_REQUEST = True
 
 LENGTH = 10_000
 RADIUS_METERS = 1_000
-TAGS = ["restaurant", "cafe", "bar"]
+TAGS = [
+    "bar",
+    "pub",
+    "restaturant",
+    "fast_food",
+    "college",
+    "university",
+    "school",
+    "bus_station",
+    "hospital",
+    "pharmacy",
+    "clinic",
+    "cinema",
+    "police",
+    "fast_court",
+]
+
 API_URL = "https://overpass-api.de/api/interpreter"
 
 RENT_PATH = DATA_BASE_PATH / "apartments_for_rent_classified_10K.csv"
@@ -155,9 +171,9 @@ def build_overpass_query_csv(
     tags_query = "|".join(tags)  # For regex matching
     query_parts = [
         f"""
-        node["amenity"~"{tags_query}"](around:{radius},{lat},{lon});
-        way["amenity"~"{tags_query}"](around:{radius},{lat},{lon});
-        relation["amenity"~"{tags_query}"](around:{radius},{lat},{lon});
+        node["amenity"~"^{tags_query}$"](around:{radius},{lat},{lon});
+        way["amenity"~"^{tags_query}$"](around:{radius},{lat},{lon});
+        relation["amenity"~"^{tags_query}$"](around:{radius},{lat},{lon});
         """
         for lat, lon in locations
     ]
