@@ -33,10 +33,12 @@ CACHE_BASE_PATH = DATA_BASE_PATH / "cache"
 
 EARTH_RADIUS = 6_371_000.0  # in meters
 
-PARALLEL_REQUESTS_JOBS = 1
+PARALLEL_REQUESTS_JOBS = 20
 PARALLEL_PROCESSING_JOBS = None
+SEMAPHORE_LIMIT = 2
 
 WAIT_TIME_AFTER_REQUEST = True
+DELAY_BETWEEN_REQUESTS = 20  # seconds
 
 LENGTH = 10_000
 RADIUS_METERS = 1_000
@@ -57,11 +59,12 @@ TAGS = [
     "fast_court",
 ]
 
+
 API_URL = "https://overpass-api.de/api/interpreter"
 
 RENT_PATH = DATA_BASE_PATH / "apartments_for_rent_classified_10K.csv"
 
-sem = Semaphore(3)
+sem = Semaphore(SEMAPHORE_LIMIT)
 
 
 def timer[**P, T](func: Callable[P, T]) -> Callable[P, T]:
@@ -212,7 +215,7 @@ async def request_overpass_api(query: str) -> BytesIO | None:
             async with session.post(API_URL, data={"data": query}) as response:
                 if response.status == 409:
                     print("Too many requests, waiting 10 seconds")
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(20)
                     continue  # Retry on 409 Conflict
                 elif response.status == 200:
                     print("Request successful")
@@ -300,6 +303,8 @@ async def load_or_cache_fetched_data(
     else:
         print(f"CACHE MISS: Fetching data and saving to {relative_path}")
         data = await processor()
+        if data.limit(1).collect().is_empty():
+            raise ValueError("No data fetched from Overpass API")
         collected_data = await data.collect_async()
         collected_data.write_parquet(cache_path, compression="zstd")
         print(f"Saved fetched data to cache at {relative_path}")
@@ -318,8 +323,10 @@ async def fetch_overpass_data(
             if buffer is None:
                 raise Exception("Failed to get Overpass API response")
             if WAIT_TIME_AFTER_REQUEST and bool(n_jobs):
-                print("Waiting 10 seconds after request")
-                await asyncio.sleep(10)  # Avoid hitting the rate limit
+                print(f"Waiting {DELAY_BETWEEN_REQUESTS} seconds after request")
+                await asyncio.sleep(
+                    DELAY_BETWEEN_REQUESTS
+                )  # Avoid hitting the rate limit
 
         return pl.scan_csv(
             buffer,
@@ -344,7 +351,7 @@ async def fetch_overpass_data(
         return pl.concat(lfs).unique(subset="@id").sort(by="@id")
 
     return await load_or_cache_fetched_data(
-        soruce=coords,
+        soruce={"tags": tags, "coords": coords},
         cache_dir=CACHE_BASE_PATH,
         processor=process_coordinates_data,
     )
