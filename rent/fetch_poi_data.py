@@ -35,11 +35,11 @@ CACHE_BASE_PATH = DATA_BASE_PATH / "cache"
 
 EARTH_RADIUS = 6_371_000.0  # in meters
 
-PARALLEL_REQUESTS_JOBS = 20
+PARALLEL_REQUESTS_JOBS = 15
 PARALLEL_PROCESSING_JOBS = None
-SEMAPHORE_LIMIT = 2
+SEMAPHORE_LIMIT = 3
 
-DELAY_BETWEEN_REQUESTS = 30  # seconds
+DELAY_BETWEEN_REQUESTS = 20  # seconds
 
 LENGTH = 10_000
 RADIUS_METERS = 1_000
@@ -172,7 +172,7 @@ def haversine_meters(p1: Coordinate, p2: Coordinate) -> float:
     Calculates the great-circle distance between two points on the Earth's surface using haversine formula.
     Parameters:
         p1 (Coordinate): Latitude and longitude of the first point in decimal degrees.
-        P2 (Coordinate): Latitude and longitude of the second point in decimal degrees.
+        p2 (Coordinate): Latitude and longitude of the second point in decimal degrees.
     Returns:
         float: The great-circle distance between the two points in meters.
     """
@@ -328,15 +328,6 @@ def chunkify[T](
     Generate chunks of data from the given iterable with a specified chunk size, ratio, or number of chunks,
     starting from a given index.
     """
-    if sum(bool(param) for param in [chunk_size, ratio, n_chunks]) > 1:
-        raise ValueError("Specify only one of chunk_size, ratio, or n_chunks")
-
-    data = np.array(data)
-
-    if len(data) == 0:
-        yield []
-        return
-
     if sum(bool(param) for param in [chunk_size, ratio, n_chunks]) != 1:
         raise ValueError("Specify exactly one of chunk_size, ratio, or n_chunks")
 
@@ -375,13 +366,14 @@ async def request_overpass_api(query: str) -> BytesIO | None:
 
     buffer = BytesIO()
 
-    for _ in range(5):
+    for i in range(5):
         async with aiohttp.ClientSession() as session:
             async with session.post(API_URL, data={"data": query}) as response:
                 if response.status in [409, 429]:
-                    print("\nToo many requests, waiting 10 seconds")
+                    print("\nToo many requests, waiting 20 seconds")
                     await asyncio.sleep(20)
-                    continue  # Retry on 409 Conflict
+                    print(f"Retrying {i}/5 times")
+                    continue
                 elif response.status == 200:
                     print("\nRequest successful")
                 else:
@@ -398,7 +390,7 @@ async def request_overpass_api(query: str) -> BytesIO | None:
                 buffer.flush()
                 buffer.seek(0)
                 return buffer
-
+    print("\nFailed to get Overpass API response")
     return None
 
 
