@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import time
+import uuid
 from asyncio import Semaphore
 from functools import partial, wraps
 from io import BytesIO
@@ -11,11 +13,12 @@ from typing import (
     Awaitable,
     Callable,
     Generator,
-    Hashable,
+    Literal,
     NoReturn,
     Sequence,
     Iterable,
     cast,
+    Counter,
 )
 
 import aiohttp
@@ -26,7 +29,6 @@ from numpy.typing import NDArray
 from sklearn.neighbors import BallTree
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as tqdm_asyncio
-import hashlib
 
 DATA_BASE_PATH = Path(__file__).parent / "data"
 CACHE_BASE_PATH = DATA_BASE_PATH / "cache"
@@ -37,15 +39,15 @@ PARALLEL_REQUESTS_JOBS = 20
 PARALLEL_PROCESSING_JOBS = None
 SEMAPHORE_LIMIT = 2
 
-WAIT_TIME_AFTER_REQUEST = True
-DELAY_BETWEEN_REQUESTS = 20  # seconds
+DELAY_BETWEEN_REQUESTS = 30  # seconds
 
 LENGTH = 10_000
 RADIUS_METERS = 1_000
-TAGS = [
+
+AMENITIES_TAGS = [
     "bar",
     "pub",
-    "restaturant",
+    "restaurant",
     "fast_food",
     "college",
     "university",
@@ -58,7 +60,24 @@ TAGS = [
     "police",
     "fast_court",
 ]
+TOURISM_TAGS = [
+    "attraction",
+    "museum",
+    "hotel",
+    "gallery",
+    "theme_park",
+]
 
+NATURAL_TAGS = ["beach"]
+
+type OverpassQueryType = Literal["amenity", "tourism", "natural", "railway"]
+
+TAGS: dict[OverpassQueryType, list[str]] = {
+    "amenity": AMENITIES_TAGS,
+    "tourism": TOURISM_TAGS,
+    "natural": NATURAL_TAGS,
+    "railway": [],
+}
 
 API_URL = "https://overpass-api.de/api/interpreter"
 
@@ -76,10 +95,7 @@ def timer[**P, T](func: Callable[P, T]) -> Callable[P, T]:
     @wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         start_time = time.time()
-        if asyncio.iscoroutinefunction(func):
-            result = asyncio.run(func(*args, **kwargs))
-        else:
-            result = func(*args, **kwargs)
+        result = func(*args, **kwargs)
         end_time = time.time()
         print(f"{func.__name__} took {end_time - start_time:.2f} seconds")
         return result
@@ -95,9 +111,14 @@ def timer[**P, T](func: Callable[P, T]) -> Callable[P, T]:
     return async_wrapper if asyncio.iscoroutinefunction(func) else wrapper
 
 
+def hash_and_generate_uuid(content: str) -> str:
+    hash_str = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return uuid.uuid5(uuid.NAMESPACE_DNS, hash_str).hex
+
+
 def clean_then_cast(column: str, dtype: pl.DataType) -> pl.Expr:
     """
-    Replace string "null" with None and cast the column to the given dtype.
+    Replace the string "null" with None and cast the column to the given dtype.
     """
     return (
         pl.when(pl.col(column) == "null")
@@ -148,24 +169,17 @@ type Coordinate = tuple[float, float]
 
 def haversine_meters(p1: Coordinate, p2: Coordinate) -> float:
     """
-    Calculate the great-circle distance between two points on the Earth's surface using haversine formula.
+    Calculates the great-circle distance between two points on the Earth's surface using haversine formula.
     Parameters:
         p1 (Coordinate): Latitude and longitude of the first point in decimal degrees.
-        p2 (Coordinate): Latitude and longitude of the second point in decimal degrees.
+        P2 (Coordinate): Latitude and longitude of the second point in decimal degrees.
     Returns:
         float: The great-circle distance between the two points in meters.
     """
     return haversine(p1, p2, unit=Unit.METERS)
 
 
-def build_tags_query(tags: list[str]) -> str:
-    """
-    Builds the tags query string for Overpass API.
-    """
-    return "|".join(tags)
-
-
-def build_overpass_query_csv(
+def build_overpass_amenities_query_csv(
     locations: Sequence[Coordinate], tags: list[str], radius: int = RADIUS_METERS
 ) -> str:
     """
@@ -184,7 +198,7 @@ def build_overpass_query_csv(
     full_query = f"""
         [out:csv(::id, ::type, name, amenity, ::lat, ::lon; true; ",")];
         (
-            {"".join(query_parts)}
+            {"\n".join(query_parts)}
         );
         out center;
     """
@@ -192,49 +206,116 @@ def build_overpass_query_csv(
     return full_query
 
 
+def build_overpass_railway_query_csv(
+    locations: Sequence[Coordinate], _: list[str], radius: int = RADIUS_METERS
+) -> str:
+    """
+    Builds the Overpass API query for subway stations in the given locations, returning results in CSV format.
+    """
+    query_parts = [
+        f"""
+        node["railway"="subway_entrance"](around:{radius},{lat},{lon});
+        node["railway"="station"]["station"="subway"](around:{radius},{lat},{lon});
+        way["railway"="station"]["station"="subway"](around:{radius},{lat},{lon});
+        relation["railway"="station"]["station"="subway"](around:{radius},{lat},{lon});
+        """
+        for lat, lon in locations
+    ]
+
+    full_query = f"""
+        [out:csv(::id, ::type, name, railway, ::lat, ::lon; true; ",")];
+        (
+            {"\n".join(query_parts)}
+        );
+        out center;
+    """
+
+    return full_query
+
+
+def build_overpass_tourism_query_csv(
+    locations: Sequence[Coordinate], tags: list[str], radius: int = RADIUS_METERS
+) -> str:
+    """
+    Builds the Overpass API query for tourism-related tags in the given locations, returning results in CSV format.
+    """
+    tags_query = "|".join(tags)  # For regex matching
+    query_parts = [
+        f"""
+        node["tourism"~"^{tags_query}$"](around:{radius},{lat},{lon});
+        way["tourism"~"^{tags_query}$"](around:{radius},{lat},{lon});
+        relation["tourism"~"^{tags_query}$"](around:{radius},{lat},{lon});
+        """
+        for lat, lon in locations
+    ]
+
+    full_query = f"""
+        [out:csv(::id, ::type, name, tourism, ::lat, ::lon; true; ",")];
+        (
+            {"\n".join(query_parts)}
+        );
+        out center;
+    """
+
+    return full_query
+
+
+def build_overpass_natural_query_csv(
+    locations: Sequence[Coordinate], tags: list[str], radius: int = RADIUS_METERS
+) -> str:
+    """
+    Builds the Overpass API query for natural-related tags in the given locations, returning results in CSV format.
+    """
+    tags_query = "|".join(tags)  # For regex matching
+    query_parts = [
+        f"""
+        node["natural"~"^{tags_query}$"](around:{radius},{lat},{lon});
+        way["natural"~"^{tags_query}$"](around:{radius},{lat},{lon});
+        relation["natural"~"^{tags_query}$"](around:{radius},{lat},{lon});
+        """
+        for lat, lon in locations
+    ]
+
+    full_query = f"""
+        [out:csv(::id,::type,name,natural,::lat,::lon; true; ",")];
+        (
+            {"\n".join(query_parts)}
+        );
+        out center;
+    """
+
+    return full_query
+
+
+type OverpassQueryBuilder = Callable[[Sequence[Coordinate], list[str], int], str]
+
+
+def get_overpass_query_builder(
+    query_type: OverpassQueryType,
+) -> OverpassQueryBuilder:
+    """
+    Returns the appropriate Overpass query builder function based on the query type.
+    """
+    match query_type:
+        case "amenity":
+            return build_overpass_amenities_query_csv
+        case "tourism":
+            return build_overpass_tourism_query_csv
+        case "natural":
+            return build_overpass_natural_query_csv
+        case "railway":
+            return build_overpass_railway_query_csv
+        case _:
+            raise ValueError(f"Unknown query type: {query_type}")
+
+
 async def get_coordinates(lf: pl.LazyFrame) -> list[Coordinate]:
     """
-    Extract latitude and longitude from the DataFrame and return as a list of tuples.
+    Extract latitude and longitude from the LazyFrame and return as a list of tuples.
     """
     df = await lf.select("latitude", "longitude").collect_async()
     zipped = df.to_numpy().tolist()
     return list(map(tuple, zipped))  # type: ignore
-
-
-@timer
-async def request_overpass_api(query: str) -> BytesIO | None:
-    """
-    Asynchronously makes a request to the Overpass API with the given query and returns the response.
-    """
-    print("Sending the request")
-
-    buffer = BytesIO()
-
-    for _ in range(5):
-        async with aiohttp.ClientSession() as session:
-            async with session.post(API_URL, data={"data": query}) as response:
-                if response.status == 409:
-                    print("Too many requests, waiting 10 seconds")
-                    await asyncio.sleep(20)
-                    continue  # Retry on 409 Conflict
-                elif response.status == 200:
-                    print("Request successful")
-                else:
-                    response.raise_for_status()
-
-                async for chunk in tqdm_asyncio(
-                    cast(Iterable[bytes], response.content.iter_chunked(1024)),
-                    unit="KB",
-                    unit_scale=True,
-                    desc="Downloading Overpass Data",
-                ):  # type: ignore
-                    buffer.write(chunk)
-
-                buffer.flush()
-                buffer.seek(0)
-                return buffer
-
-    return None
 
 
 def chunkify[T](
@@ -285,65 +366,115 @@ def chunkify[T](
             yield data[start:end].tolist()
 
 
+@timer
+async def request_overpass_api(query: str) -> BytesIO | None:
+    """
+    Asynchronously makes a request to the Overpass API with the given query and returns the response.
+    """
+    print("Sending the request")
+
+    buffer = BytesIO()
+
+    for _ in range(5):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(API_URL, data={"data": query}) as response:
+                if response.status in [409, 429]:
+                    print("\nToo many requests, waiting 10 seconds")
+                    await asyncio.sleep(20)
+                    continue  # Retry on 409 Conflict
+                elif response.status == 200:
+                    print("\nRequest successful")
+                else:
+                    response.raise_for_status()
+
+                async for chunk in tqdm_asyncio(
+                    cast(Iterable[bytes], response.content.iter_chunked(1024)),
+                    unit="KB",
+                    unit_scale=False,
+                    desc="Downloading Overpass Data",
+                ):  # type: ignore
+                    buffer.write(chunk)
+
+                buffer.flush()
+                buffer.seek(0)
+                return buffer
+
+    return None
+
+
 async def load_or_cache_fetched_data(
-    soruce: Hashable, cache_dir: Path, processor: Callable[[], Awaitable[pl.LazyFrame]]
+    source: str,
+    processor: Callable[[], Awaitable[pl.LazyFrame]],
+    cache_dir: Path = CACHE_BASE_PATH,
 ) -> pl.LazyFrame:
     """
     Load or cache fetched data from the Overpass API.
     If the data is already cached, it will be loaded from the cache.
     Otherwise, it will be fetched and saved to the cache.
     """
-    source_hash = hashlib.sha256(str(soruce).encode("utf-8")).hexdigest()
+    source_hash = hash_and_generate_uuid(source)
+
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"coords_cache_{source_hash}.parquet"
     relative_path = cache_path.relative_to(cache_dir)
+
     if cache_path.exists():
-        print(f"CACHE HIT: Loading cached data from {relative_path}")
+        print(f"\nCACHE HIT: Loading cached data from {relative_path}")
         return pl.scan_parquet(cache_path)
-    else:
-        print(f"CACHE MISS: Fetching data and saving to {relative_path}")
-        data = await processor()
-        if data.limit(1).collect().is_empty():
-            raise ValueError("No data fetched from Overpass API")
-        collected_data = await data.collect_async()
-        collected_data.write_parquet(cache_path, compression="zstd")
-        print(f"Saved fetched data to cache at {relative_path}")
-        return data
+
+    print(f"\nCACHE MISS: Fetching data and saving to {relative_path}")
+    data = await processor()
+
+    collected_data = await data.collect_async()
+    collected_data.write_parquet(cache_path, compression="zstd")
+
+    print(f"\nSaved fetched data to cache at {relative_path}")
+    return data
 
 
 @timer
-async def fetch_overpass_data(
-    coords: list[Coordinate], tags: list[str], n_jobs: int | None = None
+async def fetch_overpass_data_by_query_type(
+    coords: list[Coordinate],
+    tags: list[str],
+    query_type: OverpassQueryType,
+    n_jobs: int | None = None,
+    delay_after_request: int | None = None,
+    radius: int = RADIUS_METERS,
 ) -> pl.LazyFrame:
-
-    async def process_chunk_task(chunk: Sequence[Coordinate], pbar: tqdm_asyncio) -> pl.LazyFrame:
-        query = build_overpass_query_csv(chunk, tags)
+    async def process_chunk_task(
+        chunk: Sequence[Coordinate], pbar: tqdm_asyncio
+    ) -> pl.LazyFrame:
+        query_builder = get_overpass_query_builder(query_type)
+        query = query_builder(chunk, tags, radius)
 
         async with sem:
             buffer = await request_overpass_api(query)
             pbar.update(1)
+
             if buffer is None:
                 raise Exception("Failed to get Overpass API response")
-            if WAIT_TIME_AFTER_REQUEST and bool(n_jobs):
-                print(f"Waiting {DELAY_BETWEEN_REQUESTS} seconds after request")
-                await asyncio.sleep(
-                    DELAY_BETWEEN_REQUESTS
-                )  # Avoid hitting the rate limit
 
-        return pl.scan_csv(
+            if delay_after_request and n_jobs:
+                print(f"Waiting {delay_after_request} seconds after request")
+                await asyncio.sleep(delay_after_request)
+
+        lf = pl.scan_csv(
             buffer,
             separator=",",
             encoding="utf8",
             schema_overrides={
                 "@id": pl.Utf8,
                 "name": pl.Utf8,
-                "amenity": pl.Utf8,
+                query_type: pl.Utf8,
                 "@lat": pl.Float64,
                 "@lon": pl.Float64,
             },
         )
 
-    
+        lf = lf.rename({query_type: "tag"})
+        lf = lf.with_columns(pl.lit(query_type).alias("from_query"))
+
+        return lf
 
     async def process_coordinates_data() -> pl.LazyFrame:
         pbar = tqdm_asyncio(
@@ -353,22 +484,50 @@ async def fetch_overpass_data(
         )
 
         tasks = (
-            process_chunk_task(chunk, pbar) for chunk in chunkify(coords, n_chunks=n_jobs)
+            process_chunk_task(chunk, pbar)
+            for chunk in chunkify(coords, n_chunks=n_jobs)
         )
 
         lfs = await asyncio.gather(*tasks)
 
         pbar.close()
 
-        return pl.concat(lfs).unique(subset="@id").sort(by="@id")
+        distinct_sort_fields = ["@id", "tag", "from_query"]
+        return (
+            pl.concat(lfs)
+            .unique(subset=distinct_sort_fields)
+            .sort(by=distinct_sort_fields)
+        )
 
-    result =  await load_or_cache_fetched_data(
-        soruce={"tags": tags, "coords": coords, "radius": RADIUS_METERS},
-        cache_dir=CACHE_BASE_PATH,
+    return await load_or_cache_fetched_data(
+        source=str(
+            {
+                "tags": tags,
+                "coords": coords,
+                "radius": radius,
+                "query_type": query_type,
+            }
+        ),
         processor=process_coordinates_data,
     )
 
-    return result
+
+@timer
+async def fetch_overpass_data(
+    coords: list[Coordinate],
+    tags_map: dict[OverpassQueryType, list[str]],
+    n_jobs: int | None = None,
+    delay_after_request: int | None = None,
+    radius: int = RADIUS_METERS,
+):
+    lfs = [
+        await fetch_overpass_data_by_query_type(
+            coords, tags, query_type, n_jobs, delay_after_request, radius
+        )
+        for query_type, tags in tags_map.items()
+    ]
+
+    return pl.concat(lfs).sort(by=["@id", "tag", "from_query"])
 
 
 type Row = dict[str, Any]
@@ -376,7 +535,8 @@ type Row = dict[str, Any]
 
 def process_apartment_chunk(
     chunk: Sequence[Row],
-    amenities: NDArray[str],  # type: ignore
+    tags: NDArray[np.str_],  # POI tag per row
+    query_types: NDArray[np.str_],  # POI query_type per row
     tree: BallTree,
     radius_rad: float,
 ) -> list[dict[str, int]]:
@@ -390,15 +550,20 @@ def process_apartment_chunk(
     with tqdm(chunk, desc="Processing apartments") as pbar:
         for apt, poi_indexes in zip(chunk, neighbors):
             apt_id = apt["id"]
-            nearby_counts: dict[str, int] = {}
-            for idx in poi_indexes:
-                tag = str(amenities[idx])
-                nearby_counts[tag] = nearby_counts.get(tag, 0) + 1
+
+            # Use Counter with (tag, type) as the key
+            pair_counts = Counter((tags[idx], query_types[idx]) for idx in poi_indexes)
 
             results.extend(
-                {"id": apt_id, "amenity": tag, "count": count}
-                for tag, count in nearby_counts.items()
+                {
+                    "id": apt_id,
+                    "tag": tag,
+                    "count": count,
+                    "type": query_type,
+                }
+                for (tag, query_type), count in pair_counts.items()
             )
+
             pbar.set_postfix({"id": apt_id})
             pbar.update(1)
 
@@ -412,19 +577,24 @@ def count_pois_near_apartments(
     radius_meters: float = 1000.0,
     n_jobs: int | None = None,
 ) -> pl.DataFrame:
-    pois_np: NDArray = pois.select(["@lat", "@lon", "amenity"]).to_numpy()
+    pois_np: NDArray = pois.select(["@lat", "@lon", "tag", "from_query"]).to_numpy()
 
     radius_rad = radius_meters / EARTH_RADIUS
 
     coords = np.radians(
-        pois_np[:, :2].astype(np.float64)
-    )  # Extract latitude and longitude
-    amenities = pois_np[:, 2]  # Extract amenities
+        pois_np[:, :2].astype(np.float64)  # Extract latitude and longitude
+    )
+    tags = pois_np[:, 2]
+    query_types = pois_np[:, 3]
 
     tree = BallTree(coords, metric="haversine", leaf_size=40)  # type: ignore
 
     worker = partial(
-        process_apartment_chunk, amenities=amenities, tree=tree, radius_rad=radius_rad
+        process_apartment_chunk,
+        tags=tags,
+        query_types=query_types,
+        tree=tree,
+        radius_rad=radius_rad,
     )
 
     if n_jobs is None:
@@ -445,7 +615,13 @@ def count_pois_near_apartments(
 async def main():
     rent = load_rent_data(RENT_PATH, LENGTH)
     coordinates = await get_coordinates(rent)
-    result = await fetch_overpass_data(coordinates, TAGS, n_jobs=PARALLEL_REQUESTS_JOBS)
+
+    result = await fetch_overpass_data(
+        coords=coordinates,
+        tags_map=TAGS,
+        n_jobs=PARALLEL_REQUESTS_JOBS,
+        delay_after_request=DELAY_BETWEEN_REQUESTS,
+    )
 
     result_loaded = await result.collect_async()
     rent_loaded = await rent.collect_async()
@@ -458,15 +634,19 @@ async def main():
 
     print(final_result)
 
-    info = {
-        "tags": TAGS,
-        "radius": RADIUS_METERS,
-        "coords": coordinates,
-    }
-    info_hash = hashlib.sha256(str(info).encode("utf-8")).hexdigest()
+    info = str(
+        {
+            "tags": TAGS,
+            "length": LENGTH,
+            "radius": RADIUS_METERS,
+            "coords": coordinates,
+        }
+    )
+    info_hash = hash_and_generate_uuid(info)
 
     output_path = DATA_BASE_PATH / f"poi-data-count-{info_hash}.parquet"
     final_result.write_parquet(output_path, compression="zstd")
+
     print(f"Saved results to {output_path.relative_to(DATA_BASE_PATH.parent)}")
 
 
