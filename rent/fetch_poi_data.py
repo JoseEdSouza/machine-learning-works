@@ -31,7 +31,8 @@ from tqdm import tqdm
 from tqdm.asyncio import tqdm as tqdm_asyncio
 
 DATA_BASE_PATH = Path(__file__).parent / "data"
-CACHE_BASE_PATH = DATA_BASE_PATH / "cache"
+OUTPUT_BASE_PATH = Path(__file__).parent / "poi-data"
+CACHE_BASE_PATH = Path(__file__).parent / ".cache"
 
 EARTH_RADIUS = 6_371_000.0  # in meters
 
@@ -645,10 +646,10 @@ async def main():
     )
     info_hash = hash_and_generate_uuid(info)
 
-    output_path = DATA_BASE_PATH / f"poi-data-count-{info_hash}.parquet"
+    output_path = OUTPUT_BASE_PATH / f"poi-data-count-{info_hash}.parquet"
     final_result.write_parquet(output_path, compression="zstd")
 
-    print(f"Saved results to {output_path.relative_to(DATA_BASE_PATH.parent)}")
+    print(f"Saved results to {output_path.relative_to(OUTPUT_BASE_PATH)}")
 
 
 if __name__ == "__main__":
