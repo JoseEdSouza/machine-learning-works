@@ -536,6 +536,9 @@ def process_apartment_chunk(
         np.array([[row["latitude"], row["longitude"]] for row in chunk])
     )
 
+    if len(apt_coords_rad) == 0:
+        return []
+
     neighbors = tree.query_radius(apt_coords_rad, r=radius_rad)
 
     results = []
@@ -592,7 +595,7 @@ def count_pois_near_apartments(
     if n_jobs is None:
         n_jobs = cpu_count()
 
-    apartment_rows = list(apartments.iter_rows(named=True))
+    apartment_rows = apartments.to_dicts()
     apartment_chunks = chunkify(apartment_rows, n_chunks=n_jobs)
 
     with Pool(processes=cpu_count()) as pool:
@@ -601,6 +604,13 @@ def count_pois_near_apartments(
     results = chain.from_iterable(all_results)
 
     return pl.DataFrame(results)
+
+
+@timer
+async def collect_concurrent_lfs(*lf: pl.LazyFrame) -> list[pl.DataFrame]:
+    tasks = (lf_.collect_async() for lf_ in lf)
+
+    return await asyncio.gather(*tasks)
 
 
 @timer
@@ -615,8 +625,7 @@ async def main():
         delay_after_request=DELAY_BETWEEN_REQUESTS,
     )
 
-    result_loaded = await result.collect_async()
-    rent_loaded = await rent.collect_async()
+    result_loaded, rent_loaded = await collect_concurrent_lfs(result, rent)
 
     print("Found POIs:", result_loaded.shape[0])
 
