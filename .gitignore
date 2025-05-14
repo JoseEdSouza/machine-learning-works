@@ -180,3 +180,6 @@ cython_debug/
 # data dirs
 data/
 */data
+
+#cache dir
+.cache/
