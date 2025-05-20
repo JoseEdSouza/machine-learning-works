@@ -650,6 +650,7 @@ dependencies = [
     { name = "ruff" },
     { name = "scikit-learn" },
     { name = "scikit-optimize" },
+    { name = "scipy" },
     { name = "seaborn" },
     { name = "zstd" },
 ]
@@ -671,6 +672,7 @@ requires-dist = [
     { name = "ruff", specifier = ">=0.11.7" },
     { name = "scikit-learn", specifier = ">=1.6.1" },
     { name = "scikit-optimize", specifier = ">=0.10.2" },
+    { name = "scipy", specifier = ">=1.15.2" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "zstd", specifier = ">=1.5.7.0" },
 ]
