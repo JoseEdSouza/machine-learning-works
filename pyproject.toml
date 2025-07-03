@@ -11,8 +11,10 @@ dependencies = [
     "kagglehub>=0.3.12",
     "matplotlib>=3.10.1",
     "mypy>=1.15.0",
+    "nbformat>=5.10.4",
     "pandas>=2.2.3",
     "pandas-stubs>=2.2.3.250308",
+    "plotly>=6.2.0",
     "polars>=1.29.0",
     "py7zr>=0.22.0",
     "pyarrow>=20.0.0",
@@ -22,5 +24,6 @@ dependencies = [
     "scikit-optimize>=0.10.2",
     "scipy>=1.15.2",
     "seaborn>=0.13.2",
+    "yellowbrick>=1.5",
     "zstd>=1.5.7.0",
 ]
