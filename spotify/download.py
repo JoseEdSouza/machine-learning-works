@@ -30,12 +30,11 @@ def convert_to_parquet(path: Path) -> Path:
     This function is a placeholder and should be implemented as needed.
     """
     df = pd.read_csv(path)
-    parquet_path = path.with_suffix('.parquet')
+    parquet_path = path.with_suffix(".parquet")
     print(f"Converting {path} to {parquet_path}")
     df.to_parquet(parquet_path, index=False)
     path.unlink()
     return parquet_path
-
 
 
 # Download latest version
@@ -48,7 +47,7 @@ os.makedirs(OUTPUT_PATH, exist_ok=True)
 
 for downloaded_file in downloaded_files:
     source = Path(downloaded_file)
-    if source.suffix == '.csv':
+    if source.suffix == ".csv":
         # Convert CSV to Parquet
         source = convert_to_parquet(source)
     destination = OUTPUT_PATH / source.name
