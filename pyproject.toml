@@ -24,6 +24,8 @@ dependencies = [
     "scikit-optimize>=0.10.2",
     "scipy>=1.15.2",
     "seaborn>=0.13.2",
+    "statsmodels",
+    "tensorflow",
     "yellowbrick>=1.5",
     "zstd>=1.5.7.0",
     "tensorflow>=2.14.0",   
